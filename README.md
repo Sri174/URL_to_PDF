@@ -28,13 +28,7 @@ playwright install chromium
 
 ## Start the Server
 
-### Option A — Batch script
-```
-Double-click start.bat
-```
-
-### Option B — Manual
-```cmd
+###```cmd
 venv\Scripts\activate
 uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 ```
