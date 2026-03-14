@@ -103,3 +103,4 @@ async def convert_url_to_pdf(request: ConvertRequest):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Conversion failed: {str(e)}")
+
