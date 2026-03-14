@@ -1,0 +1,5 @@
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+playwright==1.47.0
+weasyprint==62.3
+pydantic[email]==2.9.2
