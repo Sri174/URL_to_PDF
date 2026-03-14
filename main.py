@@ -2,6 +2,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from typing import Optional
 import io
 import tempfile
 import os
@@ -19,7 +20,7 @@ if sys.platform == "win32":
     except AttributeError:
         pass
 
-app = FastAPI(title="URL to PDF Converter API", version="2.0.0")
+app = FastAPI(title="URL to PDF Converter API", version="3.0.0")
 
 # ─── Runtime Configuration ────────────────────────────────────────────────────
 RUN_MODE    = os.getenv("RUN_MODE", "render").lower()   # 'local' or 'render'
@@ -43,7 +44,17 @@ app.add_middleware(
 class ConvertRequest(BaseModel):
     url: str
     filename: str = "converted.pdf"
-    wait_seconds: float = 4.0  # extra wait for JS-heavy/Angular pages
+    wait_seconds: float = 5.0        # wait time for Angular to render
+
+    # Optional auth — if provided, Playwright will log in before capturing
+    login_url: Optional[str] = None  # e.g. "https://emgapp.zenoinfo.ae/#/login"
+    username: Optional[str] = None
+    password: Optional[str] = None
+
+    # CSS selectors for the login form fields
+    username_selector: str = "input[type='text'], input[name='username'], input[id*='user'], input[placeholder*='user' i], input[placeholder*='email' i]"
+    password_selector: str = "input[type='password']"
+    submit_selector: str   = "button[type='submit'], input[type='submit'], button:has-text('Login'), button:has-text('Sign in')"
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -65,7 +76,7 @@ def _is_private_hostname(hostname: str) -> bool:
 
 
 def _is_publicly_accessible(url: str, timeout: int = 10) -> bool:
-    """Check reachability by hitting just the base URL (ignores hash fragment)."""
+    """Check reachability using the base URL only (ignores hash fragment)."""
     try:
         parsed   = urlparse(url)
         base_url = f"{parsed.scheme}://{parsed.netloc}"
@@ -75,18 +86,24 @@ def _is_publicly_accessible(url: str, timeout: int = 10) -> bool:
         return False
 
 
-def _convert_with_playwright(url: str, tmp_path: str, wait_seconds: float) -> None:
+def _convert_with_playwright(
+    url: str,
+    tmp_path: str,
+    wait_seconds: float,
+    login_url: Optional[str],
+    username: Optional[str],
+    password: Optional[str],
+    username_selector: str,
+    password_selector: str,
+    submit_selector: str,
+) -> None:
     """
-    Render URL → PDF using Playwright (sync, runs in a thread).
-
-    Key fixes for Angular hash-routing (/#/path):
-      - Uses 'domcontentloaded' instead of 'networkidle' for hash routes
-        because SPAs keep background XHR polling that never reaches idle.
-      - Waits `wait_seconds` for Angular to bootstrap & render.
-      - Verifies the page has real content before capturing.
-      - Scrolls to bottom to trigger any lazy-loaded content.
+    1. Optionally log in with username/password.
+    2. Navigate to the target URL.
+    3. Wait for Angular to render.
+    4. Capture as PDF.
     """
-    from playwright.sync_api import sync_playwright
+    from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
     with sync_playwright() as p:
         browser = p.chromium.launch()
@@ -97,26 +114,51 @@ def _convert_with_playwright(url: str, tmp_path: str, wait_seconds: float) -> No
         page = context.new_page()
 
         try:
-            # Hash routes need domcontentloaded — networkidle hangs on SPAs
+            # ── Step 1: Login if credentials provided ────────────────────────
+            if login_url and username and password:
+                page.goto(login_url, wait_until="domcontentloaded", timeout=60000)
+                page.wait_for_timeout(2000)  # wait for login form to render
+
+                # Fill username
+                page.fill(username_selector, username)
+                page.wait_for_timeout(500)
+
+                # Fill password
+                page.fill(password_selector, password)
+                page.wait_for_timeout(500)
+
+                # Click submit
+                page.click(submit_selector)
+
+                # Wait for navigation after login (up to 15s)
+                try:
+                    page.wait_for_load_state("domcontentloaded", timeout=15000)
+                    page.wait_for_timeout(2000)  # allow post-login redirect to settle
+                except PWTimeout:
+                    pass  # some SPAs don't trigger full navigation on login
+
+            # ── Step 2: Navigate to target URL ───────────────────────────────
+            # Use domcontentloaded for Angular hash routes (/#/path)
             wait_strategy = "domcontentloaded" if "#" in url else "networkidle"
             page.goto(url, wait_until=wait_strategy, timeout=60000)
 
-            # Give Angular time to bootstrap and render components
+            # ── Step 3: Wait for Angular to fully render ──────────────────────
             page.wait_for_timeout(int(wait_seconds * 1000))
 
-            # Best-effort: confirm page has visible content (not blank)
+            # Best-effort: confirm page has visible content
             try:
                 page.wait_for_function(
                     "document.body && document.body.innerText.trim().length > 50",
                     timeout=15000,
                 )
             except Exception:
-                pass  # proceed anyway; some pages render inside canvas/SVG
+                pass  # proceed anyway
 
-            # Scroll to bottom to trigger lazy-loaded content
+            # Scroll to trigger any lazy-loaded content
             page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
             page.wait_for_timeout(500)
 
+            # ── Step 4: Capture PDF ───────────────────────────────────────────
             page.pdf(
                 path=tmp_path,
                 format="A4",
@@ -128,6 +170,7 @@ def _convert_with_playwright(url: str, tmp_path: str, wait_seconds: float) -> No
                     "right": "20px",
                 },
             )
+
         finally:
             context.close()
             browser.close()
@@ -138,7 +181,7 @@ def _convert_with_playwright(url: str, tmp_path: str, wait_seconds: float) -> No
 def root():
     return {
         "message": "URL to PDF Converter API is running ✅",
-        "version": "2.0.0",
+        "version": "3.0.0",
         "run_mode": RUN_MODE,
     }
 
@@ -150,7 +193,7 @@ def health_check():
 
 @app.post("/convert")
 async def convert_url_to_pdf(request: ConvertRequest):
-    """Convert any URL to a downloadable PDF."""
+    """Convert any URL to a downloadable PDF, with optional login support."""
     import asyncio
 
     url = request.url.strip()
@@ -193,35 +236,38 @@ async def convert_url_to_pdf(request: ConvertRequest):
             tmp_path = tmp_file.name
 
         try:
-            # Run sync Playwright in a thread — keeps FastAPI event loop free
             await asyncio.to_thread(
-                _convert_with_playwright, url, tmp_path, request.wait_seconds
+                _convert_with_playwright,
+                url,
+                tmp_path,
+                request.wait_seconds,
+                request.login_url,
+                request.username,
+                request.password,
+                request.username_selector,
+                request.password_selector,
+                request.submit_selector,
             )
         except ImportError:
-            # Fallback: WeasyPrint (no JS — for simple static pages only)
             try:
                 import weasyprint
                 weasyprint.HTML(url=url).write_pdf(tmp_path)
             except ImportError:
                 raise HTTPException(
                     status_code=500,
-                    detail=(
-                        "No PDF engine found. "
-                        "Install: pip install playwright && playwright install chromium"
-                    ),
+                    detail="Install: pip install playwright && playwright install chromium",
                 )
 
         with open(tmp_path, "rb") as f:
             pdf_bytes = f.read()
 
-        # Catch blank PDF — happens when page needs auth or didn't render
+        # Catch blank PDF
         if len(pdf_bytes) == 0:
             raise HTTPException(
                 status_code=500,
                 detail=(
                     "PDF generated but is empty. "
-                    "The page may require authentication or took too long to render. "
-                    "Try increasing wait_seconds in your request."
+                    "Check that login credentials are correct and selectors match the login form."
                 ),
             )
 
@@ -243,7 +289,6 @@ async def convert_url_to_pdf(request: ConvertRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Conversion failed: {str(e)}")
     finally:
-        # Always clean up the temp file
         if tmp_path and os.path.exists(tmp_path):
             try:
                 os.unlink(tmp_path)
