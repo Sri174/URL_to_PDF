@@ -3,35 +3,68 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# Virtual environments
-.venv/
-venv/
-env/
-ENV/
+# C extensions
+*.so
 
 # Distribution / packaging
+.Python
 build/
+develop-eggs/
 dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
 *.egg-info/
+*.egg
 
-# Pytest
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+.coverage
+.tox/
+.nox/
 .pytest_cache/
+coverage.xml
+htmlcov/
 
-# Editor directories and files
+# Pyenv
+.python-version
+
+# virtualenv
+.venv/
+venv/
+ENV/
+env/
+env.bak/
+venv.bak/
+
+# VS Code
 .vscode/
-.idea/
-*.sublime-workspace
 
-# OS files
+# macOS
 .DS_Store
-Thumbs.db
 
-# Playwright browser cache (if cached inside project)
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Logs
+*.log
+
+# Temporary
+*.tmp
+*.swp
+
+# Playwright browser cache (usually in user profile, but ignore if present)
 ms-playwright/
 
-# dotenv
-.env
-
-# Logs and databases
-*.log
-*.sqlite3
+# OneDrive temporary files
+~$*
